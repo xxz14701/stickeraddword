@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LINE貼圖文字編輯器</title>
+    <!-- 引入 Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 JSZip 函式庫，用於打包 ZIP 檔案 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.7.1/jszip.min.js"></script>
+    <style>
+        /* 設置基本字體 */
+        :root {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Canvas 容器樣式 */
+        .canvas-container {
+            position: relative;
+            width: 100%;
+            padding-top: 100%; /* 1:1 比例 */
+        }
+        .canvas-preview {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #f7f7f7; /* 淺灰色背景方便查看透明度 */
+            border-radius: 0.5rem;
+        }
+        /* 隱藏原生文件輸入 */
+        #stickerUpload, #fontUpload {
+            display: none;
+        }
+        /* 繪製文字的樣式定義 (Canvas用) */
+        .sticker-text-input {
+            width: 100%;
+            padding: 0.5rem;
+            border: 1px solid #ccc;
+            border-radius: 0.375rem;
+            margin-bottom: 0.5rem;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen p-4 sm:p-8">
+
+    <div class="max-w-6xl mx-auto bg-white shadow-xl rounded-xl p-6 sm:p-10">
+        <h1 class="text-3xl font-bold text-center text-indigo-700 mb-2">LINE 貼圖文字生成器</h1>
+        <p class="text-center text-gray-500 mb-8">上傳您的透明背景貼圖，並為其加上自訂字體和顏色的白邊文字。</p>
+
+        <!-- 步驟 1: 檔案上傳與字體設定 -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-10 p-6 border border-indigo-200 rounded-lg bg-indigo-50">
+            <!-- 貼圖上傳 -->
+            <div>
+                <label class="block text-lg font-medium text-gray-700 mb-2">1. 上傳 LINE 貼圖 (PNG, 透明背景)</label>
+                <button onclick="document.getElementById('stickerUpload').click()"
+                        class="w-full py-3 px-4 bg-indigo-600 text-white font-semibold rounded-lg shadow-md hover:bg-indigo-700 transition duration-150">
+                    選擇貼圖圖片 (PNG)
+                </button>
+                <input type="file" id="stickerUpload" accept="image/png" multiple onchange="handleStickerUpload(event)">
+                <p id="stickerCount" class="mt-2 text-sm text-gray-500">已選擇 0 張圖片。</p>
+            </div>
+
+            <!-- 字體上傳與設定 -->
+            <div>
+                <label class="block text-lg font-medium text-gray-700 mb-2">2. 設定通用字體</label>
+                <div class="flex items-center space-x-4 mb-3">
+                    <button onclick="document.getElementById('fontUpload').click()"
+                            class="flex-1 py-3 px-4 bg-purple-600 text-white font-semibold rounded-lg shadow-md hover:bg-purple-700 transition duration-150 text-sm">
+                        上傳自訂字體 (TTF/OTF)
+                    </button>
+                    <input type="file" id="fontUpload" accept=".ttf,.otf" onchange="handleFontUpload(event)">
+                </div>
+                <p id="fontStatus" class="text-sm text-gray-500">當前字體：預設 (Inter)</p>
+                <p class="text-sm text-gray-500 italic">提示：您可以在下方每張貼圖獨立設定文字顏色。</p>
+            </div>
+        </div>
+
+        <!-- 步驟 2: 預覽與編輯區 -->
+        <h2 class="text-2xl font-bold text-gray-700 mb-4 border-b pb-2">3. 編輯貼圖文字與獨立顏色設定</h2>
+
+        <div id="stickerGrid" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-6">
+            <!-- 貼圖編輯卡片將在這裡動態生成 -->
+            <div id="placeholder" class="col-span-full text-center py-10 text-gray-500 italic">請先上傳貼圖圖片。</div>
+        </div>
+
+        <!-- 步驟 3: 批量下載 -->
+        <div class="mt-10 pt-6 border-t border-gray-300">
+            <h2 class="text-2xl font-bold text-gray-700 mb-4">4. 完成與下載</h2>
+            <button id="batchDownloadBtn" onclick="batchDownload()" disabled
+                    class="w-full py-4 bg-green-500 text-white font-bold text-xl rounded-lg shadow-lg hover:bg-green-600 transition duration-150 disabled:opacity-50 disabled:cursor-not-allowed">
+                一鍵下載所有貼圖 (ZIP 壓縮檔)
+            </button>
+            <p class="mt-4 text-sm text-gray-500 text-center">所有貼圖將被打包成一個 ZIP 檔案下載。</p>
+        </div>
+
+        <!-- 提示訊息框 -->
+        <div id="messageBox" class="fixed bottom-4 right-4 bg-red-600 text-white px-4 py-2 rounded-lg shadow-xl hidden transition-opacity duration-300"></div>
+
+    </div>
+
+    <script>
+        // 全域變數
+        const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+        // 儲存 { file: File, img: Image, text: '', textColor: '#000000', id: '...' }
+        let loadedStickers = []; 
+        let currentFontFamily = 'Inter, sans-serif'; // 預設字體
+        let currentFontName = '預設 (Inter)';
+        
+        // 擴充的預設文字選項 (分為三組)
+        const PREDEFINED_TEXTS = [
+            // 節日/節慶
+            '恭喜發財', '慶祝雙十', '重陽登高', '聖誕快樂', '情人節快樂', '中秋節快樂', '母親節快樂', '父親節快樂', '端午安康', '萬聖節快樂', 'Happy New Year', '感恩節快樂',
+            // 日常對話/讚美
+            '沒問題', 'Hi', '早安', '午安', '晚安', '生日快樂', '吃飽沒', '謝謝', '讚', '好棒', 'OK', '收到',
+            // 提醒/祝福/情緒
+            '平安', '日安', '辛苦了', '注意保暖', '記得帶傘', '好喔', '哈哈', '掰掰', '拜託', '加油', '恭喜', '路上小心'
+        ];
+
+        const stickerGrid = document.getElementById('stickerGrid');
+        const stickerCountText = document.getElementById('stickerCount');
+        const fontStatusText = document.getElementById('fontStatus');
+        const batchDownloadBtn = document.getElementById('batchDownloadBtn');
+
+        // --- 核心功能函數 ---
+
+        /**
+         * 顯示暫時的提示訊息框
+         * @param {string} message 訊息內容
+         */
+        function showMessage(message) {
+            const msgBox = document.getElementById('messageBox');
+            msgBox.textContent = message;
+            msgBox.classList.remove('hidden', 'opacity-0');
+            msgBox.classList.add('opacity-100');
+            setTimeout(() => {
+                msgBox.classList.remove('opacity-100');
+                msgBox.classList.add('opacity-0');
+                setTimeout(() => {
+                    msgBox.classList.add('hidden');
+                }, 300);
+            }, 3000);
+        }
+
+        /**
+         * 處理貼圖圖片上傳
+         * @param {Event} event 
+         */
+        function handleStickerUpload(event) {
+            const files = Array.from(event.target.files);
+            if (files.length === 0) return;
+
+            loadedStickers = [];
+            document.getElementById('placeholder')?.remove();
+            stickerCountText.textContent = `已選擇 ${files.length} 張圖片。`;
+            stickerGrid.innerHTML = ''; // 清空舊的內容
+            batchDownloadBtn.disabled = true;
+
+            let loadedCount = 0;
+            const totalFiles = files.length;
+
+            files.forEach((file, index) => {
+                if (!file.type.startsWith('image/png')) {
+                    showMessage(`檔案 ${file.name} 不是 PNG 格式，已忽略。`);
+                    return;
+                }
+                if (file.size > MAX_FILE_SIZE) {
+                     showMessage(`檔案 ${file.name} 過大 (超過 5MB)，已忽略。`);
+                    return;
+                }
+
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        // 初始化貼圖物件
+                        const stickerId = `sticker-${Date.now()}-${index}`;
+                        const stickerObject = {
+                            id: stickerId,
+                            file: file,
+                            img: img,
+                            text: '',
+                            textColor: '#000000', // 預設為黑色
+                            canvas: null 
+                        };
+                        loadedStickers.push(stickerObject);
+                        
+                        // 建立 UI 元素
+                        createStickerCard(stickerObject);
+
+                        loadedCount++;
+                        if (loadedCount === totalFiles) {
+                            // 確保所有圖片都已加載並排序
+                            loadedStickers.sort((a, b) => a.file.name.localeCompare(b.file.name));
+                            // 觸發初始繪製
+                            loadedStickers.forEach(s => redrawSticker(s.id));
+                            batchDownloadBtn.disabled = false;
+                        }
+                    };
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        /**
+         * 處理自訂字體上傳
+         * @param {Event} event 
+         */
+        function handleFontUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const fontId = 'CustomUploadedFont';
+            const reader = new FileReader();
+
+            reader.onload = (e) => {
+                const fontUrl = e.target.result;
+                
+                // 1. 注入 @font-face 規則
+                const style = document.createElement('style');
+                style.textContent = `
+                    @font-face {
+                        font-family: '${fontId}';
+                        src: url('${fontUrl}');
+                    }
+                `;
+                document.head.appendChild(style);
+
+                // 2. 應用到全域字體變數
+                currentFontFamily = `'${fontId}', sans-serif`;
+                currentFontName = file.name;
+                fontStatusText.textContent = `當前字體：${file.name}`;
+                showMessage(`字體 "${file.name}" 已成功加載！`);
+
+                // 3. 重繪所有貼圖
+                redrawAll();
+            };
+
+            reader.readAsDataURL(file);
+        }
+
+        /**
+         * 創建單個貼圖的編輯卡片
+         * @param {Object} stickerObject 貼圖物件
+         */
+        function createStickerCard(stickerObject) {
+            const card = document.createElement('div');
+            card.id = `card-${stickerObject.id}`;
+            card.className = 'bg-white border border-gray-200 rounded-xl shadow-lg p-3 flex flex-col items-center hover:shadow-xl transition-shadow duration-300';
+            
+            // 預覽區 (Canvas)
+            const canvasContainer = document.createElement('div');
+            canvasContainer.className = 'canvas-container mb-3 w-full';
+            const canvas = document.createElement('canvas');
+            canvas.id = `canvas-${stickerObject.id}`;
+            canvas.className = 'canvas-preview';
+            canvasContainer.appendChild(canvas);
+
+            // 預設文字選擇器
+            const selectText = document.createElement('select');
+            selectText.className = 'sticker-text-input mb-2 bg-gray-50 border border-gray-300';
+            selectText.title = '選擇預設文字';
+            
+            let defaultOption = document.createElement('option');
+            defaultOption.value = '';
+            defaultOption.textContent = '--- 點選選擇預設文字 ---';
+            selectText.appendChild(defaultOption);
+
+            // 分類並加入選項
+            // (為了保持程式碼簡潔，這裡直接將所有 PREDEFINED_TEXTS 當作一個群組加入，但會在前端顯示所有選項)
+            PREDEFINED_TEXTS.forEach(text => {
+                const option = document.createElement('option');
+                option.value = text;
+                option.textContent = text;
+                selectText.appendChild(option);
+            });
+
+            // 輸入框
+            const textInput = document.createElement('input');
+            textInput.type = 'text';
+            textInput.placeholder = '或在此輸入自訂文字...';
+            textInput.className = 'sticker-text-input';
+            
+            // 聯動邏輯：輸入框變更
+            textInput.oninput = (e) => {
+                stickerObject.text = e.target.value;
+                selectText.value = e.target.value; // 保持下拉選單同步
+                redrawSticker(stickerObject.id);
+            };
+
+            // 聯動邏輯：下拉選單變更
+            selectText.onchange = (e) => {
+                const selectedText = e.target.value;
+                textInput.value = selectedText; // 保持輸入框同步
+                stickerObject.text = selectedText;
+                redrawSticker(stickerObject.id);
+            };
+
+            // 顏色選擇器
+            const colorInput = document.createElement('input');
+            colorInput.type = 'color';
+            colorInput.value = stickerObject.textColor; // 使用貼圖物件的獨立顏色
+            colorInput.className = 'w-full h-10 rounded-lg border-2 border-gray-300 cursor-pointer p-1 mt-1 mb-3';
+            colorInput.title = '選擇文字顏色';
+
+            // 顏色變更聯動邏輯
+            colorInput.onchange = (e) => {
+                stickerObject.textColor = e.target.value;
+                redrawSticker(stickerObject.id);
+            };
+
+            // 下載按鈕
+            const downloadBtn = document.createElement('button');
+            downloadBtn.textContent = '下載單張 PNG';
+            downloadBtn.className = 'mt-2 w-full py-2 px-4 bg-blue-500 text-white font-semibold rounded-lg hover:bg-blue-600 transition duration-150 text-sm';
+            downloadBtn.onclick = () => downloadSticker(stickerObject.id, stickerObject.file.name);
+
+            // 組合卡片
+            card.appendChild(canvasContainer);
+            card.appendChild(selectText); // 加入下拉選單
+            card.appendChild(textInput);
+            card.appendChild(colorInput); // 新增獨立顏色選擇器
+            card.appendChild(downloadBtn);
+            stickerGrid.appendChild(card);
+
+            // 將 canvas 元素連結到 stickerObject
+            stickerObject.canvas = canvas;
+
+            // 設置 canvas 尺寸為原始圖片尺寸 (確保透明度不失真)
+            canvas.width = stickerObject.img.naturalWidth;
+            canvas.height = stickerObject.img.naturalHeight;
+        }
+
+        /**
+         * 繪製單個貼圖
+         * @param {string} id 貼圖 ID
+         */
+        function redrawSticker(id) {
+            const sticker = loadedStickers.find(s => s.id === id);
+            if (!sticker || !sticker.canvas) return;
+
+            const canvas = sticker.canvas;
+            const ctx = canvas.getContext('2d');
+            
+            // 1. 清空 Canvas 並保持透明背景
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 2. 繪製原始貼圖
+            // 繪製前先將 Canvas 尺寸設置為原始圖片尺寸，確保 LINE 尺寸要求
+            canvas.width = sticker.img.naturalWidth;
+            canvas.height = sticker.img.naturalHeight;
+            ctx.drawImage(sticker.img, 0, 0, canvas.width, canvas.height);
+
+            // 3. 繪製文字 (如果有)
+            if (sticker.text.trim() !== '') {
+                const fontSize = canvas.height * 0.15; // 文字大小，相對圖片高度的 15%
+                
+                ctx.font = `bold ${fontSize}px ${currentFontFamily}`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'bottom';
+                
+                // 計算文字位置 (放在底部中央)
+                const x = canvas.width / 2;
+                const y = canvas.height * 0.95; // 距離底部 5%
+
+                // 設置白邊 (描邊)
+                const strokeWidth = fontSize * 0.08; // 描邊寬度
+                ctx.strokeStyle = '#FFFFFF'; // 白色描邊
+                ctx.lineWidth = strokeWidth;
+                ctx.lineJoin = 'round'; // 讓邊角更平滑
+
+                // 設置文字顏色 (使用貼圖物件的獨立顏色)
+                ctx.fillStyle = sticker.textColor;
+
+                // 先描邊，後填色 (白邊在底下，文字在上面)
+                ctx.strokeText(sticker.text, x, y);
+                ctx.fillText(sticker.text, x, y);
+            }
+        }
+
+        /**
+         * 重新繪製所有貼圖 (例如改變字體時)
+         */
+        function redrawAll() {
+            loadedStickers.forEach(s => redrawSticker(s.id));
+        }
+
+        /**
+         * 下載單個貼圖
+         * @param {string} id 貼圖 ID
+         * @param {string} originalFileName 原始檔名
+         */
+        function downloadSticker(id, originalFileName) {
+            const sticker = loadedStickers.find(s => s.id === id);
+            if (!sticker || !sticker.canvas) {
+                showMessage('錯誤：找不到貼圖或 Canvas。');
+                return;
+            }
+
+            // 確保下載前執行最後一次繪圖
+            redrawSticker(id); 
+
+            // 從 Canvas 取得 PNG 資料 URL
+            const dataURL = sticker.canvas.toDataURL('image/png');
+            
+            // 建立下載連結
+            const a = document.createElement('a');
+            a.href = dataURL;
+            
+            // 產生新的檔名
+            const baseName = originalFileName.replace(/\.png$/i, '');
+            const newText = sticker.text.trim() ? `_${sticker.text.substring(0, 10)}` : '';
+            a.download = `${baseName}_modified${newText}.png`;
+
+            // 模擬點擊下載
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        /**
+         * 批量下載所有貼圖並打包成 ZIP
+         */
+        async function batchDownload() {
+            if (loadedStickers.length === 0) {
+                showMessage('請先上傳貼圖！');
+                return;
+            }
+
+            showMessage('正在打包 ZIP 檔案，請稍候...');
+            batchDownloadBtn.disabled = true;
+
+            const zip = new JSZip();
+            // 在 ZIP 檔中建立一個資料夾
+            const stickerFolder = zip.folder("LINE_Stickers_with_Text");
+
+            try {
+                // 遍歷所有貼圖並加入到 ZIP
+                for (const sticker of loadedStickers) {
+                    // 1. 確保 Canvas 內容是最新的
+                    redrawSticker(sticker.id);
+                    
+                    // 2. 取得 Base64 資料
+                    const dataURL = sticker.canvas.toDataURL('image/png');
+                    const base64Data = dataURL.split(',')[1];
+                    
+                    // 3. 產生檔案名稱
+                    const baseName = sticker.file.name.replace(/\.png$/i, '');
+                    // 確保檔案名稱不會太長
+                    const newText = sticker.text.trim() ? `_${sticker.text.substring(0, 10)}` : ''; 
+                    const filename = `${baseName}_modified${newText}.png`;
+
+                    // 4. 以 Base64 格式加入到 ZIP 資料夾
+                    stickerFolder.file(filename, base64Data, { base64: true });
+                }
+
+                // 5. 生成 ZIP 檔案 (以 Blob 格式)
+                const content = await zip.generateAsync({ type: "blob" });
+
+                // 6. 觸發下載
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(content);
+                a.download = 'LINE_Stickers_Export.zip';
+                
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(a.href); // 釋放 Blob URL 資源
+
+                showMessage('ZIP 檔案下載已完成！');
+            } catch (error) {
+                console.error('ZIP 打包或下載失敗:', error);
+                showMessage('ZIP 打包失敗，請檢查主控台錯誤。');
+            } finally {
+                batchDownloadBtn.disabled = false;
+            }
+        }
+
+    </script>
+</body>
+</html>
